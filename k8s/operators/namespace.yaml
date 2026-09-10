@@ -1,0 +1,6 @@
+# Shared operator namespace. Owned by project 1 because it installs both operators first; project 5
+# runs Beam on the same Flink runner and will declare KafkaTopic resources against the same Strimzi.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: operators

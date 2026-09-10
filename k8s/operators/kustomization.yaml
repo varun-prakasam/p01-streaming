@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# No `namespace:` transformer. Both manifests are rendered with their namespaces already correct,
+# and the transformer would rewrite the cluster-scoped bindings' subject namespaces along with
+# everything else.
+
+resources:
+  - namespace.yaml
+  - strimzi-cluster-operator.yaml
+  - flink-kubernetes-operator.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      project_ref: p01-streaming
