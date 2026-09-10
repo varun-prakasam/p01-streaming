@@ -1,0 +1,7 @@
+# Reads Flink's output topics, writes BigQuery. Nothing else.
+#
+# google-cloud-bigquery rather than google-cloud-bigquery-storage: the sink uses insert_rows_json,
+# which takes dictionaries. See sink/writer.py for why the Storage Write API is not worth its
+# protobuf schema at this volume.
+confluent-kafka>=2.5,<3
+google-cloud-bigquery>=3.25,<4

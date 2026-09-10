@@ -7,7 +7,7 @@
 # crash but quietly producing fewer events than were consumed.
 
 [run]
-source = bridge,sqlrunner,api
+source = bridge,sink,sqlrunner,api
 branch = True
 omit =
     */tests/*

@@ -1,0 +1,18 @@
+# Mirrors the defaults in sink/config.py; a test asserts the two agree.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: p01-sink-config
+data:
+  GCP_PROJECT_ID: varun-data-engineering
+  P01_KAFKA_BOOTSTRAP: kafka-kafka-bootstrap.p01-streaming:9092
+  P01_SINK_GROUP: bq-sink
+
+  # Bounded both ways. The row cap keeps an append inside BigQuery's request limit; the time cap is
+  # what actually matters here, because window aggregates arrive once a minute and would otherwise
+  # sit in a buffer waiting for hundreds of siblings that never come.
+  P01_SINK_BATCH_MAX_ROWS: "500"
+  P01_SINK_BATCH_MAX_SECONDS: "10"
+
+  P01_SINK_POLL_TIMEOUT_SECONDS: "1.0"
+  P01_SINK_HEARTBEAT_SECONDS: "60"

@@ -1,0 +1,51 @@
+# Reads Flink's output topics and writes BigQuery.
+#
+# This component exists because Google's Flink BigQuery connector is published only for Flink 1.17,
+# a 2023 release, and building on it would pin the whole project to that version. Flink writes its
+# results to Kafka; this reads them and writes to BigQuery.
+#
+# It runs as `flink` — the ServiceAccount holding the Workload Identity binding — because it is the
+# only component in this namespace that talks to Google. The bridge deliberately holds nothing.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bq-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bq-sink
+  template:
+    metadata:
+      labels:
+        app: bq-sink
+    spec:
+      serviceAccountName: flink
+      # Kafka retention is 24h. If this stops for longer than that, unconsumed aggregates age out
+      # and are gone — so it is as load-bearing as the broker itself.
+      priorityClassName: stateful-engine
+      # Long enough to finish the current batch, write it, and commit offsets. A kill mid-batch
+      # replays from the last commit rather than losing rows, but replaying costs duplicate work.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+      containers:
+        - name: sink
+          image: us-central1-docker.pkg.dev/varun-data-engineering/data-platform/p01-sink:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: p01-sink-config
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

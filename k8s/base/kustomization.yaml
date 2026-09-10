@@ -7,9 +7,11 @@ resources:
   - namespace.yaml
   - serviceaccounts.yaml
   - configmap.yaml
+  - configmap-sink.yaml
   - kafka.yaml
   - topics.yaml
   - bridge.yaml
+  - sink.yaml
 
 labels:
   - includeSelectors: false

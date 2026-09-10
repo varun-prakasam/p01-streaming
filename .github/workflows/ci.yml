@@ -26,8 +26,8 @@ permissions:
   id-token: write
 
 jobs:
-  bridge:
-    name: bridge unit tests
+  python:
+    name: unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -38,14 +38,21 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -r bridge/requirements-dev.txt
+        run: |
+          pip install -r bridge/requirements-dev.txt
+          pip install -r sink/requirements-dev.txt
 
       - name: Test with coverage
-        # .coveragerc pins branch coverage at 100%. The bridge is the only place data can go missing
-        # without anything failing, so the gate is every line and every branch — statement coverage
-        # alone called project 3's retry loop covered while its exhaustion path fell through.
+        # One combined report across both components, so the 100% gate cannot be satisfied by one
+        # of them while the other slips. --append is what merges the two runs; without it the
+        # second overwrites the first and the gate silently measures half the code.
+        #
+        # .coveragerc pins *branch* coverage. The bridge and the sink are both places data can go
+        # missing without anything failing, and statement coverage alone called project 3's retry
+        # loop covered while its exhaustion path fell through returning None.
         run: |
           coverage run -m unittest discover -s bridge/tests -t . -v
+          coverage run --append -m unittest discover -s sink/tests -t . -v
           coverage report
 
       - name: Coverage summary
@@ -55,7 +62,7 @@ jobs:
   images:
     name: build images
     runs-on: ubuntu-latest
-    needs: [bridge]
+    needs: [python]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v5

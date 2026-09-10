@@ -1,0 +1,22 @@
+# The BigQuery sink: reads Flink's output topics, writes BigQuery.
+#
+# Separate from the bridge on purpose. They have different identities — the sink holds the Workload
+# Identity binding and the bridge deliberately holds nothing — and different failure modes, so
+# co-locating them would mean a bridge restart takes the warehouse writer down with it.
+
+FROM python:3.12-slim
+
+COPY sink/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
+
+WORKDIR /app
+COPY sink/ /app/sink/
+
+# Unbuffered, or the liveness heartbeat sits in a pipe buffer and a healthy pod looks stalled.
+ENV PYTHONUNBUFFERED=1
+
+RUN useradd --uid 10002 --create-home --shell /usr/sbin/nologin sink
+USER 10002
+
+ENTRYPOINT ["python", "-m", "sink.main"]
