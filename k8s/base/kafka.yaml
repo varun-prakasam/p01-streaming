@@ -8,7 +8,7 @@
 # KRaft, so there is no ZooKeeper: a second distributed system to run, monitor and keep alive for
 # metadata that Kafka can now hold itself.
 
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
   name: broker
@@ -49,17 +49,20 @@ spec:
       priorityClassName: stateful-engine
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: kafka
-  annotations:
-    strimzi.io/node-pools: enabled
-    strimzi.io/kraft: enabled
 spec:
   kafka:
-    version: 4.1.0
-    metadataVersion: 4.1-IV0
+    # Strimzi 1.x supports 4.2.0 through 4.3.1; anything outside that range is rejected at
+    # reconcile. metadataVersion is deliberately omitted — on a new cluster the operator derives it
+    # from the broker version, and guessing the IV suffix wrong fails in a way that reads as a
+    # schema error.
+    #
+    # The node-pools and kraft annotations that Strimzi 0.x required are gone: both are mandatory in
+    # 1.x, so declaring them says nothing.
+    version: 4.3.1
     listeners:
       - name: plain
         port: 9092

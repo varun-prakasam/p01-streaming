@@ -5,7 +5,7 @@
 # `.v1` in the name is the contract. Projects 5 and 8 both read this topic, so a breaking change to
 # the value shape publishes a `.v2` and lets them migrate rather than discovering it at runtime.
 
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: bsky.posts.v1
@@ -31,7 +31,7 @@ spec:
     cleanup.policy: delete
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: bsky.posts.dlq.v1
