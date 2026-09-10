@@ -83,3 +83,10 @@ jobs:
             --config=cloudbuild/bridge.yaml \
             --substitutions=_TAG=${{ github.sha }} \
             --project=${{ vars.GCP_PROJECT_ID }} .
+
+      - name: Build the sink image
+        run: |
+          gcloud builds submit \
+            --config=cloudbuild/sink.yaml \
+            --substitutions=_TAG=${{ github.sha }} \
+            --project=${{ vars.GCP_PROJECT_ID }} .
