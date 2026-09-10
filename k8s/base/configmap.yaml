@@ -1,0 +1,35 @@
+# Runtime configuration. Every key here mirrors a default in bridge/config.py, and
+# bridge/tests/test_config.py asserts the two agree — a setting that drifts between the code and the
+# cluster is one nobody can reason about.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: p01-bridge-config
+data:
+  P01_KAFKA_BOOTSTRAP: kafka-kafka-bootstrap.p01-streaming:9092
+  P01_TOPIC: bsky.posts.v1
+  P01_DLQ_TOPIC: bsky.posts.dlq.v1
+
+  # Server-side filtering, and the most consequential setting in the project. Unfiltered the
+  # firehose is ~500 events/sec, overwhelmingly likes and follows; filtered to posts it measures
+  # ~37-45. That is 14x less Cloud NAT egress, broker disk and TaskManager work.
+  P01_WANTED_COLLECTIONS: app.bsky.feed.post
+
+  P01_CURSOR_PATH: /var/lib/bridge/cursor
+
+  # Deliberate overlap on reconnect: duplicates are certain and a gap is impossible. Downstream
+  # dedup removes the duplicates; nothing could remove a gap.
+  P01_REPLAY_OVERLAP_SECONDS: "5"
+
+  # Past an hour of backlog the freshest data is worth more than the oldest, and replaying at many
+  # times realtime floods the broker.
+  P01_MAX_REPLAY_SECONDS: "3600"
+
+  # Measured: Jetstream serves ~36 hours. Past that it does not error — it silently starts from the
+  # oldest event it holds, so the bridge compares what it got against what it asked for.
+  P01_JETSTREAM_RETENTION_SECONDS: "129600"
+
+  P01_CURSOR_FLUSH_SECONDS: "5"
+  P01_CONNECT_TIMEOUT_SECONDS: "10"
+  P01_READ_TIMEOUT_SECONDS: "60"
+  P01_HEARTBEAT_SECONDS: "60"

@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# This path is fixed by the platform's ArgoCD Application
+# (gitops/apps/projects/p01-streaming.yaml) and must not move.
+resources:
+  - ../../base

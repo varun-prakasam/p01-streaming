@@ -1,0 +1,81 @@
+# The Jetstream bridge: one WebSocket in, one Kafka topic out.
+#
+# Exactly one replica, enforced structurally rather than by hoping. Two bridges would both read the
+# whole firehose and produce every event twice, and duplicates directly corrupt the counts that are
+# this project's product. `Recreate` stops the old pod before starting the new one, and the
+# ReadWriteOnce cursor volume means a second pod cannot start even if something else went wrong.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bridge-cursor
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: dynamic-rwo
+  resources:
+    requests:
+      # It holds one integer. The minimum a PD can be is far more than enough, and this is the
+      # smallest that pd-balanced will provision.
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bridge
+spec:
+  replicas: 1
+  strategy:
+    # Not RollingUpdate. During a rolling update both pods run briefly, and for the seconds they
+    # overlap every event is produced twice.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bridge
+  template:
+    metadata:
+      labels:
+        app: bridge
+    spec:
+      serviceAccountName: bridge
+      # The bridge holds a cursor that is the only record of how far the project has read, and it is
+      # the single source of everything downstream. Evicting it to make room for a scheduled job
+      # would take the whole pipeline dark, so it declares the same priority as the engines.
+      priorityClassName: stateful-engine
+      # Long enough for the loop to finish its current message, flush the producer and persist the
+      # cursor. Kubernetes sends SIGKILL after this, and a kill mid-flush replays on restart rather
+      # than losing anything — but replaying is duplicates, and duplicates cost work downstream.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: bridge
+          image: us-central1-docker.pkg.dev/varun-data-engineering/data-platform/p01-bridge:latest
+          # The image tag never changes, so a push is the deployment and ArgoCD sees no diff.
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: p01-bridge-config
+          resources:
+            requests:
+              cpu: 150m
+              memory: 192Mi
+            limits:
+              # No CPU limit: throttling a socket reader adds latency to every event for no benefit
+              # on a node where the request already reserves what it needs.
+              memory: 384Mi
+          volumeMounts:
+            - name: cursor
+              mountPath: /var/lib/bridge
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: cursor
+          persistentVolumeClaim:
+            claimName: bridge-cursor

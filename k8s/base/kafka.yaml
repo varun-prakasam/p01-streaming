@@ -1,0 +1,91 @@
+# Apache Kafka in KRaft mode, one broker, managed by Strimzi.
+#
+# One broker is honest rather than lazy. Three brokers on a single node buy no availability — the
+# node is the failure domain — and cost three times the memory on a machine with roughly 220m of CPU
+# to spare. Durability comes from the persistent volume and from the bridge's ability to replay from
+# Jetstream, not from replication that shares a kernel.
+#
+# KRaft, so there is no ZooKeeper: a second distributed system to run, monitor and keep alive for
+# metadata that Kafka can now hold itself.
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: broker
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  replicas: 1
+  # Both roles on one node. Separating controller from broker is right when they scale
+  # independently; with one of each it is two JVMs where one will do, on the node that is already
+  # the constraint.
+  roles:
+    - controller
+    - broker
+  storage:
+    type: persistent-claim
+    size: 32Gi
+    class: dynamic-rwo
+    # The log is replayable — from Jetstream for ~36 hours, and beyond that it is not history worth
+    # keeping. Deleting the claim with the cluster avoids a stranded disk nobody remembers paying
+    # for.
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: 700m
+      memory: 2560Mi
+    limits:
+      memory: 2560Mi
+  jvmOptions:
+    # Set explicitly, and well inside the container limit. A JVM sizing itself from the cgroup takes
+    # ~75% of the limit as heap and then meets the limit under GC pressure, which surfaces as an
+    # unexplained OOMKill rather than as memory pressure.
+    -Xms: 1024m
+    -Xmx: 1024m
+  template:
+    pod:
+      # Explicit, per gitops/README.md:50. An unlabelled pod inherits pipeline-default, which is the
+      # wrong priority for the thing every other workload in this project depends on.
+      priorityClassName: stateful-engine
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: kafka
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 4.1.0
+    metadataVersion: 4.1-IV0
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      # One broker, so every replication factor is 1. Strimzi rejects a Kafka whose defaults exceed
+      # the broker count, and stating them is clearer than discovering the rejection.
+      offsets.topic.replication.factor: 1
+      transaction.state.log.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      default.replication.factor: 1
+      min.insync.replicas: 1
+      # Off deliberately. A typo in a consumer's topic name should fail loudly, not quietly create a
+      # topic that then sits empty while somebody wonders where the data went.
+      auto.create.topics.enable: "false"
+  entityOperator:
+    topicOperator:
+      # This is what turns topics into git-managed resources: a KafkaTopic reconciled by ArgoCD
+      # rather than an rpk invocation somebody ran once and nobody can find.
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+    template:
+      pod:
+        priorityClassName: stateful-engine

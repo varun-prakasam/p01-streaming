@@ -1,0 +1,50 @@
+# Topics as resources, which is most of why Strimzi is here rather than a hand-written StatefulSet.
+# Partition count and retention are reviewable in a diff and reconciled by ArgoCD, instead of living
+# in a command somebody ran once against a shell nobody has any more.
+#
+# `.v1` in the name is the contract. Projects 5 and 8 both read this topic, so a breaking change to
+# the value shape publishes a `.v2` and lets them migrate rather than discovering it at runtime.
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: bsky.posts.v1
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  # Six, for consumers that do not exist yet. Flink's parallelism cannot exceed the partition count
+  # without a repartition, and raising it later rehashes every key to a different partition — which
+  # breaks the per-author ordering the `did` key exists to provide. Six costs a few MB of metadata
+  # now and avoids that conversation entirely.
+  partitions: 6
+  replicas: 1
+  config:
+    retention.ms: "86400000"       # 24h — the replay window for Flink, not an archive
+    # A hard ceiling per partition, so the volume cannot fill even if time-based retention
+    # misbehaves: 6 x 4 GiB is 24 GiB of a 32 GiB disk. A full log directory takes the broker
+    # offline, and the bridge then blocks rather than dropping — recoverable, but only if the disk
+    # never actually fills.
+    retention.bytes: "4294967296"
+    segment.bytes: "268435456"
+    # Delete, not compact. These are events, not a keyed changelog; compaction would keep only the
+    # latest post per author, which is not what any consumer wants.
+    cleanup.policy: delete
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: bsky.posts.dlq.v1
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  # One partition: ordering is irrelevant for frames nobody could parse, and the volume should be
+  # approximately zero. If this topic is busy, something upstream changed shape.
+  partitions: 1
+  replicas: 1
+  config:
+    # Longer than the main topic. A dead letter is only useful if it is still there when somebody
+    # investigates, and nobody investigates within 24 hours.
+    retention.ms: "604800000"      # 7 days
+    retention.bytes: "536870912"
+    cleanup.policy: delete
