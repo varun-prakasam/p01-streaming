@@ -1,0 +1,8 @@
+# The bridge holds one WebSocket and produces to Kafka. It needs nothing else — no Google client,
+# because it holds no Google credential, and no parsing library beyond the standard json module.
+#
+# confluent-kafka rather than kafka-python: it wraps librdkafka, so `acks=all` acknowledgement,
+# delivery callbacks and a bounded producer queue are the library's own semantics rather than
+# something reimplemented in Python. The queue behaviour is what makes "block, never drop" possible.
+confluent-kafka>=2.5,<3
+websocket-client>=1.8,<2

@@ -1,0 +1,26 @@
+# The Jetstream bridge: one WebSocket in, one Kafka topic out.
+#
+# Slim rather than alpine. confluent-kafka links librdkafka, and the manylinux wheels that carry it
+# are built against glibc — on musl pip falls back to compiling librdkafka from source, which needs
+# a toolchain in the image and turns a ten-second install into several minutes.
+
+FROM python:3.12-slim
+
+# Dependencies first, so a source change does not reinstall them.
+COPY bridge/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
+
+WORKDIR /app
+COPY bridge/ /app/bridge/
+
+# Unbuffered, or the liveness heartbeat sits in a pipe buffer and the staleness alert fires on a
+# perfectly healthy pod.
+ENV PYTHONUNBUFFERED=1
+
+# Non-root. The bridge needs to write exactly one file — the cursor — and the volume is mounted
+# writable for this uid; nothing else in the image needs to be.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin bridge
+USER 10001
+
+ENTRYPOINT ["python", "-m", "bridge.main"]

@@ -1,0 +1,7 @@
+# Test-only dependencies. Deliberately not in requirements.txt: that file defines the image the
+# bridge runs from, and a test runner has no business shipping alongside a production workload.
+#
+# The tests themselves need nothing beyond the standard library — unittest and unittest.mock — so
+# this is only the coverage gate.
+-r requirements.txt
+coverage>=7.5,<8

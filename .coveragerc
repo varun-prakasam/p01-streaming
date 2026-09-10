@@ -1,0 +1,30 @@
+# Coverage for the Python that runs in production. Flink SQL sits outside this gate — it executes in
+# a JVM against a real cluster, and is covered by a separate mini-cluster job in CI.
+#
+# branch = True on purpose. Statement coverage called project 3's retry loop covered while its
+# exhaustion path fell through returning None, which reads downstream as "no rows left". The same
+# shape of bug is available here in the producer's backpressure path, where the failure is not a
+# crash but quietly producing fewer events than were consumed.
+
+[run]
+source = bridge,sqlrunner,api
+branch = True
+omit =
+    */tests/*
+
+[report]
+# The bridge is the only place data can go missing without anything failing, so the bar is every
+# line and every branch. It is a few hundred lines with no framework glue; anything less is a
+# regression rather than a target.
+fail_under = 100
+show_missing = True
+skip_covered = False
+
+exclude_lines =
+    pragma: no cover
+    # `sys.exit(main())`. main() itself is tested; this line is not reachable from a test, because
+    # runpy re-executes the module and the fresh __main__ namespace defines its own main() and
+    # Bridge, so a patch on the cached module never reaches them — the real main() then blocks
+    # trying to reach Kafka. Project 3 covered its equivalent only because every dependency there
+    # lived in another module.
+    if __name__ == .__main__.:

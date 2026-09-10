@@ -1,0 +1,13 @@
+# Once this file exists, .gitignore is no longer consulted by gcloud, so everything that should stay
+# out of a build context has to be repeated here.
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+.coverage
+htmlcov/
+
+# Manifests are ArgoCD's, not Cloud Build's.
+k8s/
+.github/

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
+
+# Coverage output. The threshold lives in .coveragerc, which is committed; this is just the run.
+.coverage
+htmlcov/
+
+# Never commit credentials. This platform authenticates through Workload Identity and there is no
+# key file anywhere in the portfolio.
+*.json.key
+service-account*.json
+.env
