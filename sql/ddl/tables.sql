@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS `varun-data-engineering.p01_streaming_raw.posts`
 
   observed_time   TIMESTAMP NOT NULL OPTIONS(description="Jetstream's clock, assigned on receipt. The watermark basis"),
   claimed_time    TIMESTAMP OPTIONS(description="record.createdAt, written by the client. Unverified and often wrong"),
-  lag_ms          INT64    OPTIONS(description="observed_time - claimed_time. Negative means the client claims the future"),
+  claimed_time_raw STRING   OPTIONS(description="The unparsed createdAt, kept only when parsing failed. Values here mean the timestamp format moved; a rising clock_suspect rate with this column empty means bad client clocks. The two are different problems."),
+  lag_ms          INT64    OPTIONS(description="observed_time - claimed_time, in milliseconds. Negative means the client claims the future"),
   clock_suspect   BOOL     OPTIONS(description="claimed_time outside [observed - 30d, observed + 1h]. Counted, never used for ordering"),
 
   langs           ARRAY<STRING>,
@@ -84,9 +85,9 @@ CREATE TABLE IF NOT EXISTS `varun-data-engineering.p01_streaming_curated.window_
   events            INT64,
   distinct_authors  INT64,
   replies           INT64,
-  suspect_clocks    INT64 OPTIONS(description="Rows whose claimed_time is implausible. Counted, and excluded from the percentiles"),
-  p50_lag_ms        INT64,
-  p95_lag_ms        INT64,
+  suspect_clocks    INT64 OPTIONS(description="Rows whose claimed_time is implausible. Counted, and excluded from avg_lag_ms"),
+  future_dated      INT64 OPTIONS(description="Plausible rows claiming a time ahead of observation. ~6-7% of real traffic"),
+  avg_lag_ms        INT64 OPTIONS(description="Mean lag over non-suspect rows. Percentiles are not computed in Flink — v_skew_profile takes them exactly from raw"),
   emitted_at        TIMESTAMP OPTIONS(description="When Flink emitted this row, not when the window ended"),
   watermark_delay_s INT64
 )
@@ -101,16 +102,17 @@ CREATE TABLE IF NOT EXISTS `varun-data-engineering.p01_streaming_curated.window_
   distinct_authors  INT64,
   replies           INT64,
   suspect_clocks    INT64,
-  p50_lag_ms        INT64,
-  p95_lag_ms        INT64,
+  future_dated      INT64,
+  avg_lag_ms        INT64,
   emitted_at        TIMESTAMP,
   watermark_delay_s INT64
 )
 PARTITION BY DATE(window_start)
 OPTIONS(description="The same windows, emitted ten minutes after close. The difference from _fast is the product.");
 
--- The freshness signal. One row per minute regardless of traffic, so a stopped pipeline and a quiet
--- minute on Bluesky are distinguishable — in a count of posts alone they are not.
+-- The freshness signal. One row per closed window that carried traffic — a windowed GROUP BY emits
+-- nothing for an empty window, so absence is the alarm, not a zero. Includes deletes, so it stays
+-- non-zero in a minute where nothing was created.
 CREATE TABLE IF NOT EXISTS `varun-data-engineering.p01_streaming_curated.pipeline_health`
 (
   window_end        TIMESTAMP NOT NULL,
@@ -122,10 +124,30 @@ PARTITION BY DATE(window_end)
 OPTIONS(description="Liveness heartbeat from the Flink job.");
 
 -- ==================================================================================================
--- The revision: a view, so it cannot go stale and costs nothing to keep.
+-- Views. Two jobs: deduplicate, and answer the question.
+--
+-- Deduplication is not optional here. The pipeline is at-least-once end to end on purpose — the
+-- bridge rewinds its cursor on reconnect, and the sink commits Kafka offsets only after BigQuery
+-- acknowledges, so a crash between those two points rewrites a batch. Both choices make loss
+-- impossible and duplicates certain, which is the right trade when counts are the product, but it
+-- means every read of these tables must collapse them first.
+--
+-- Without this, a duplicated `window_counts_fast` row would fan out the join in v_revisions and
+-- report a revision that is an artefact of a retry rather than of the watermark. That is precisely
+-- the conclusion this project must not get wrong.
 -- ==================================================================================================
 
 CREATE OR REPLACE VIEW `varun-data-engineering.p01_streaming_curated.v_revisions` AS
+WITH fast AS (
+  SELECT * FROM `varun-data-engineering.p01_streaming_curated.window_counts_fast`
+  -- Last writer wins. Re-emissions of the same window carry a later emitted_at, and a re-emission
+  -- is a recomputation over more complete state, so the newest row is also the most correct one.
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY window_start ORDER BY emitted_at DESC) = 1
+),
+settled AS (
+  SELECT * FROM `varun-data-engineering.p01_streaming_curated.window_counts_settled`
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY window_start ORDER BY emitted_at DESC) = 1
+)
 SELECT
   f.window_start,
   f.window_end,
@@ -133,14 +155,58 @@ SELECT
   s.events                                        AS settled,
   s.events - f.events                             AS delta,
   SAFE_DIVIDE(s.events - f.events, f.events)      AS pct_revision,
-  f.p50_lag_ms,
+  f.avg_lag_ms,
   f.suspect_clocks,
+  f.future_dated,
   -- A window that never settled is itself a finding: either the pipeline stopped, or the ten-minute
-  -- watermark has not passed yet. The dashboard distinguishes the two by window age.
+  -- watermark has not passed yet. The dashboard distinguishes the two by window age, which is why
+  -- window_end is exposed rather than only the flag.
   s.events IS NULL                                AS unsettled
-FROM `varun-data-engineering.p01_streaming_curated.window_counts_fast` f
-LEFT JOIN `varun-data-engineering.p01_streaming_curated.window_counts_settled` s
+FROM fast f
+LEFT JOIN settled s
   USING (window_start);
+
+-- The skew distribution, taken exactly rather than approximated.
+--
+-- Flink deliberately does not compute percentiles: every row's lag_ms already lands in raw, so
+-- BigQuery can take true quantiles over it. A streaming sketch would be an approximation of data we
+-- are keeping anyway.
+--
+-- The date predicate is not tidiness. `posts` sets require_partition_filter, so a view without one
+-- fails at query time rather than merely costing money; two days also bounds the scan to roughly
+-- 12M rows however long the table lives.
+CREATE OR REPLACE VIEW `varun-data-engineering.p01_streaming_curated.v_skew_profile` AS
+WITH deduped AS (
+  SELECT observed_time, lag_ms, clock_suspect
+  FROM `varun-data-engineering.p01_streaming_raw.posts`
+  WHERE DATE(observed_time) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
+    AND operation = 'create'
+  -- The raw table takes duplicates from the same at-least-once path. rev distinguishes a genuine
+  -- update from a retry of the same write.
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY uri, operation, rev ORDER BY kafka_offset) = 1
+)
+SELECT
+  TIMESTAMP_TRUNC(observed_time, MINUTE)                          AS window_start,
+  COUNT(*)                                                        AS events,
+  COUNTIF(clock_suspect)                                          AS suspect_clocks,
+  COUNTIF(NOT clock_suspect AND lag_ms < 0)                       AS future_dated,
+  COUNTIF(NOT clock_suspect AND lag_ms > 0)                       AS backdated,
+  -- Suspect clocks excluded throughout: one timestamp from 2099 would otherwise own the p99.
+  APPROX_QUANTILES(IF(clock_suspect, NULL, lag_ms), 100)[OFFSET(50)] AS p50_lag_ms,
+  APPROX_QUANTILES(IF(clock_suspect, NULL, lag_ms), 100)[OFFSET(95)] AS p95_lag_ms,
+  APPROX_QUANTILES(IF(clock_suspect, NULL, lag_ms), 100)[OFFSET(99)] AS p99_lag_ms
+FROM deduped
+GROUP BY window_start;
+
+-- Deduplicated raw, for anything that counts rather than inspects. Inspection wants the duplicates
+-- visible; counting never does.
+CREATE OR REPLACE VIEW `varun-data-engineering.p01_streaming_curated.v_posts` AS
+SELECT * EXCEPT(row_num) FROM (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY uri, operation, rev ORDER BY kafka_offset) AS row_num
+  FROM `varun-data-engineering.p01_streaming_raw.posts`
+  WHERE DATE(observed_time) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
+)
+WHERE row_num = 1;
 
 -- ==================================================================================================
 -- Clear the inherited table expiration.
