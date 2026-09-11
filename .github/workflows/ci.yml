@@ -98,3 +98,12 @@ jobs:
             --config=cloudbuild/sink.yaml \
             --substitutions=_TAG=${{ github.sha }} \
             --project=${{ vars.GCP_PROJECT_ID }} .
+
+      - name: Build the Flink image
+        # The slow one: a ~670MB base plus PyFlink. Its Dockerfile dry-runs the committed SQL as a
+        # build step, so an image that would start a job producing nothing never gets pushed.
+        run: |
+          gcloud builds submit \
+            --config=cloudbuild/flink.yaml \
+            --substitutions=_TAG=${{ github.sha }} \
+            --project=${{ vars.GCP_PROJECT_ID }} .

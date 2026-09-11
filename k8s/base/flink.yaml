@@ -1,0 +1,122 @@
+# The Flink job: one FlinkDeployment in application mode, running the committed SQL as one job.
+#
+# Application mode means the JobManager exists for this job alone and runs its main() itself, so
+# there is no session cluster to share, nothing to submit to, and nothing left behind when it stops.
+#
+# Sizing, against the base node's 3920m allocatable with 2691m already requested:
+#
+#     steady      2691 + 250 (JM) + 500 (TM)          = 3441m   88%
+#     at 12:00    3441 + 300 (p03's nightly CronJob)  = 3741m   95%   179m of margin
+#
+# The plan's 300m/600m would have put the nightly peak at 3891m — 29m of margin, which is none. Any
+# pod then goes Pending and the autoscaler quietly adds a second $98/month node. At ~37 events/sec
+# this job does not need more; the limit factors below let both pods burst into idle CPU without
+# claiming it.
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: bsky-windows
+  annotations:
+    # After the topics. ArgoCD cannot tell when Strimzi has actually created one, so this orders the
+    # apply rather than guaranteeing readiness — a job that starts before its output topics exist
+    # fails its first write, restarts with backoff, and heals once they appear.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  # Pinned by digest, unlike the bridge and sink. A stateful job cannot float: with `:latest`, any
+  # pod restart — a crash, a node upgrade — would silently run whatever SQL was pushed last and try
+  # to restore it from a checkpoint taken by the old job graph. Pinned, git says which SQL is
+  # running, and changing this line IS the upgrade: the operator sees a new image and upgrades the
+  # job from its last checkpoint. The two-step procedure is in the README under Deploying.
+  image: us-central1-docker.pkg.dev/varun-data-engineering/data-platform/p01-flink@sha256:7efb2a9790c0fcad3447d4a652a36562eacebc128abe71cff87fc2637f1b9128
+  # A digest cannot change underneath a node, so there is nothing to re-check on every start.
+  imagePullPolicy: IfNotPresent
+  flinkVersion: v2_1
+  # Annotated for Workload Identity, and the only identity in this namespace that can write GCS.
+  serviceAccount: flink
+
+  flinkConfiguration:
+    # One TaskManager with two slots runs the whole job at parallelism 2.
+    taskmanager.numberOfTaskSlots: "2"
+
+    # State lives on the heap. It is tiny: a minute of distinct authors for each open window, and
+    # the settled view holds roughly eleven windows open at a time. RocksDB would add a native
+    # library and a disk to hold a few megabytes.
+    state.backend.type: hashmap
+
+    # Checkpoints. Every key below was checked against the 2.1 reference: state.checkpoints.dir and
+    # state.savepoints.dir, the names in most examples on the internet, were REMOVED in Flink 2.0.
+    # An unknown key is ignored rather than rejected, so using them would have silently put every
+    # checkpoint on the JobManager's local disk and lost all of them on the first pod restart.
+    execution.checkpointing.interval: "60s"
+    execution.checkpointing.min-pause: "30s"
+    execution.checkpointing.timeout: "5min"
+    # Three consecutive failures before the job restarts. A single slow GCS write should not bounce
+    # the pipeline; a sustained problem should.
+    execution.checkpointing.tolerable-failed-checkpoints: "3"
+    execution.checkpointing.num-retained: "2"
+    # Kept when the job is cancelled, so an upgrade or a manual stop can restore from it.
+    execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+    execution.checkpointing.dir: gs://varun-data-engineering-flink-state/p01/checkpoints
+    execution.checkpointing.savepoint-dir: gs://varun-data-engineering-flink-state/p01/savepoints
+
+    # HA, which is what upgradeMode: last-state requires. Leader election and checkpoint pointers go
+    # in ConfigMaps; the metadata they point at goes here.
+    #
+    # This prefix must NOT be under the bucket's age-based delete rule. Checkpoints are rewritten
+    # every minute, so a seven-day rule never touches a live one — but HA metadata is partly written
+    # once at submission, and ageing it out produces a job that runs green for a week and then
+    # cannot recover from its first JobManager restart. The platform's lifecycle rule is scoped to
+    # p01/checkpoints/ and p01/savepoints/ for exactly this reason.
+    high-availability.type: kubernetes
+    high-availability.storageDir: gs://varun-data-engineering-flink-state/p01/ha
+
+    # Requests stay small; limits let the pods use idle CPU. The JobManager bursts hardest because
+    # it runs the Python driver and the SQL planner at submission and then idles.
+    kubernetes.jobmanager.cpu.limit-factor: "4"
+    kubernetes.taskmanager.cpu.limit-factor: "2"
+    # The Python driver is a separate process outside Flink's memory accounting but inside the
+    # container's limit. Without headroom it can take the container over at submission and read as
+    # an unexplained OOMKill on a job that has not started.
+    kubernetes.jobmanager.memory.limit-factor: "1.5"
+
+    python.client.executable: /opt/pyflink-venv/bin/python
+    python.executable: /opt/pyflink-venv/bin/python
+
+  podTemplate:
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: pod-template
+    spec:
+      # The same class as the broker and the bridge, and deliberately no workload-class=batch
+      # toleration: this must never land on the Spot pool.
+      priorityClassName: stateful-engine
+
+  jobManager:
+    resource:
+      cpu: 0.25
+      memory: "1280m"
+
+  taskManager:
+    resource:
+      cpu: 0.5
+      memory: "2048m"
+
+  job:
+    # In Flink 2.1 the PyFlink driver ships in opt/, not lib/, so this is both where the entry class
+    # lives and the only copy of it on the classpath.
+    jarURI: local:///opt/flink/opt/flink-python-2.1.3.jar
+    entryClass: org.apache.flink.client.python.PythonDriver
+    args:
+      - -pyclientexec
+      - /opt/pyflink-venv/bin/python
+      - -pym
+      - sqlrunner.main
+      # Puts /opt/flink/usrlib on the driver's PYTHONPATH so `sqlrunner` imports as a package.
+      - -pyfs
+      - /opt/flink/usrlib
+    parallelism: 2
+    # Restores from the latest checkpoint via HA, with no savepoint needed. Kafka offsets are part of
+    # that checkpoint, so a restart rewinds to exactly where the state was taken.
+    upgradeMode: last-state
+    state: running

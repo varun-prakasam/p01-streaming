@@ -12,6 +12,7 @@ resources:
   - topics.yaml
   - bridge.yaml
   - sink.yaml
+  - flink.yaml
 
 labels:
   - includeSelectors: false

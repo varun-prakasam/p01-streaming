@@ -21,10 +21,24 @@ spec:
   config:
     retention.ms: "86400000"       # 24h — the replay window for Flink, not an archive
     # A hard ceiling per partition, so the volume cannot fill even if time-based retention
-    # misbehaves: 6 x 4 GiB is 24 GiB of a 32 GiB disk. A full log directory takes the broker
-    # offline, and the bridge then blocks rather than dropping — recoverable, but only if the disk
-    # never actually fills.
-    retention.bytes: "4294967296"
+    # misbehaves. A full log directory takes the broker offline, and the bridge then blocks rather
+    # than dropping — recoverable, but only if the disk never actually fills.
+    #
+    # Lowered from 4 GiB when the Flink output topics were added. The ceilings have to sum to less
+    # than the disk or they guarantee nothing, and the budget for a 32 GiB volume is:
+    #
+    #     bsky.posts.v1            6 x 2 GiB    = 12.00 GiB
+    #     bsky.raw.v1              3 x 2 GiB    =  6.00 GiB
+    #     bsky.counts.fast.v1      1 x 256 MiB  =  0.25 GiB
+    #     bsky.counts.settled.v1   1 x 256 MiB  =  0.25 GiB
+    #     bsky.health.v1           1 x 256 MiB  =  0.25 GiB
+    #     bsky.posts.dlq.v1        1 x 512 MiB  =  0.50 GiB
+    #                                            ---------
+    #                                             19.25 GiB of 32 GiB
+    #
+    # 2 GiB is still ~6 days of measured volume per partition against a 24h retention, so time
+    # remains the binding limit and this stays a backstop rather than a policy.
+    retention.bytes: "2147483648"
     segment.bytes: "268435456"
     # Delete, not compact. These are events, not a keyed changelog; compaction would keep only the
     # latest post per author, which is not what any consumer wants.
@@ -47,4 +61,88 @@ spec:
     # investigates, and nobody investigates within 24 hours.
     retention.ms: "604800000"      # 7 days
     retention.bytes: "536870912"
+    cleanup.policy: delete
+
+---
+# ==================================================================================================
+# Flink's outputs. The sink reads these and writes BigQuery; nothing else consumes them.
+#
+# Retention here is sink downtime tolerance, not a replay window — if these age out, the data is
+# still in bsky.posts.v1 and reprocessing is a new consumer group rather than a restore.
+# ==================================================================================================
+
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: bsky.raw.v1
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  # Three rather than six. The sink is a single process, and this topic has no key, so partitions
+  # buy nothing but headroom — and every partition costs disk against the budget above.
+  partitions: 3
+  replicas: 1
+  config:
+    # Twelve hours of sink downtime before anything is lost from this topic. Generous: the sink
+    # drains a window in seconds, and the alert fires at ten minutes of consumer lag.
+    retention.ms: "43200000"
+    retention.bytes: "2147483648"
+    segment.bytes: "268435456"
+    cleanup.policy: delete
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: bsky.counts.fast.v1
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  # One partition, so the window sequence is readable in order with a console consumer. At one row
+  # per minute there is nothing to parallelise.
+  partitions: 1
+  replicas: 1
+  config:
+    retention.ms: "604800000"      # 7 days
+    retention.bytes: "268435456"
+    # Smaller than retention.bytes on purpose. Kafka cannot delete the active segment, so a topic
+    # whose segment is larger than its size limit never rolls and never expires anything — the
+    # default 1 GiB segment against a 256 MiB cap would make that ceiling decorative.
+    segment.bytes: "67108864"
+    # And a time bound on rolling, because 1440 small rows a day would take years to fill 64 MiB.
+    segment.ms: "86400000"
+    cleanup.policy: delete
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: bsky.counts.settled.v1
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    retention.ms: "604800000"
+    retention.bytes: "268435456"
+    segment.bytes: "67108864"
+    segment.ms: "86400000"
+    cleanup.policy: delete
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: bsky.health.v1
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    retention.ms: "604800000"
+    retention.bytes: "268435456"
+    segment.bytes: "67108864"
+    segment.ms: "86400000"
     cleanup.policy: delete

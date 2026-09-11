@@ -1,0 +1,63 @@
+# The Flink job image: the committed SQL, the runner that submits it, and the two jars Flink needs
+# to reach Kafka and GCS.
+#
+# Versions are pinned together and must stay that way. flink-sql-connector-kafka is published as
+# <connector>-<flink minor>, so 5.0.0-2.1 is the Kafka connector built for Flink 2.1 and nothing
+# else; the pyflink wheel must match the cluster it submits to; and the GCS filesystem jar is copied
+# out of the distribution itself rather than downloaded, which makes a version mismatch impossible
+# rather than merely unlikely.
+
+FROM flink:2.1.3-java17
+
+ARG KAFKA_CONNECTOR_VERSION=5.0.0-2.1
+ARG PYFLINK_VERSION=2.1.3
+
+# The Kafka SQL connector, in lib/ so it is on the classpath for both the JobManager and the
+# TaskManagers without any pipeline.jars plumbing.
+#
+# No `ADD --chmod`: Cloud Build's docker step is the legacy builder, which rejects it. And the chmod
+# below is not optional without it — a URL ADD lands root-owned with mode 600, Flink's entrypoint
+# drops to the `flink` user, and the jar is then unreadable. The image builds cleanly and the job
+# dies at runtime with ClassNotFoundException for the Kafka connector, which is a long way from here.
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar \
+    /opt/flink/lib/flink-sql-connector-kafka.jar
+
+# GCS, for checkpoints, savepoints and HA metadata. Flink ships filesystems as plugins rather than
+# on the main classpath, and a plugin only loads from its own directory under plugins/ — leaving
+# this jar in opt/ means gs:// URIs fail at runtime with "no filesystem for scheme", after the job
+# has already started.
+#
+# The glob is deliberate: if the distribution ever stops shipping it, cp fails and the build stops
+# here, rather than producing an image that cannot checkpoint.
+RUN chmod 644 /opt/flink/lib/flink-sql-connector-kafka.jar \
+    && mkdir -p /opt/flink/plugins/gs-fs-hadoop \
+    && cp /opt/flink/opt/flink-gs-fs-hadoop-*.jar /opt/flink/plugins/gs-fs-hadoop/
+
+# PyFlink, in its own virtualenv.
+#
+# Not a system pip install: Debian marks its Python as externally managed, so pip refuses, and
+# --break-system-packages would work today and break on the next base image bump. The venv is
+# explicit, and python.client.executable in the FlinkDeployment points at it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/pyflink-venv \
+    && /opt/pyflink-venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/pyflink-venv/bin/pip install --no-cache-dir apache-flink==${PYFLINK_VERSION}
+
+# The job itself. usrlib is on the classpath in application mode, and PYTHONPATH makes `sqlrunner`
+# importable as a package from there.
+COPY sqlrunner/ /opt/flink/usrlib/sqlrunner/
+COPY sql/ /opt/flink/usrlib/sql/
+
+# The tests do not ship. They import `sink`, which is not in this image.
+RUN rm -rf /opt/flink/usrlib/sqlrunner/tests
+
+ENV PYTHONPATH=/opt/flink/usrlib
+ENV P01_SQL_DIR=/opt/flink/usrlib/sql
+
+# Fails the build if the SQL cannot be split, or if it would start a job that produces nothing.
+# Cheaper to catch here than on a cluster, and it runs on every image build rather than only in CI.
+RUN /opt/pyflink-venv/bin/python -m sqlrunner.main --dry-run
+
+# The operator supplies the entry point; flink:*'s own entrypoint dispatches jobmanager/taskmanager.

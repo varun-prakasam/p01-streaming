@@ -2,6 +2,12 @@
 -- BigQuery connector is published only for Flink 1.17 and building on it would pin this project to
 -- a 2023 release.
 --
+-- At-least-once, stated rather than inherited. It is the connector's default, but it is also a design
+-- decision: exactly-once here would need Kafka transactions and a read_committed sink consumer, and
+-- would still not survive the sink's own at-least-once hop into BigQuery. Duplicates are expected
+-- and the curated views collapse them; that is the chosen trade, so it is written down where it is
+-- made.
+--
 -- Every column is emitted as a string or a plain scalar that BigQuery coerces. The sink is a dumb
 -- writer by design — it does no transformation at all — so what these tables emit is exactly what
 -- lands in the warehouse, and the schema lives in two places (here and the table DDL) rather than
@@ -31,7 +37,7 @@ CREATE TABLE out_raw (
     'topic' = 'bsky.raw.v1',
     'properties.bootstrap.servers' = 'kafka-kafka-bootstrap.p01-streaming:9092',
     'format' = 'json',
-    'json.timestamp-format.standard' = 'ISO-8601'
+    'sink.delivery-guarantee' = 'at-least-once'
 );
 
 CREATE TABLE out_counts_fast (
@@ -49,7 +55,8 @@ CREATE TABLE out_counts_fast (
     'connector' = 'kafka',
     'topic' = 'bsky.counts.fast.v1',
     'properties.bootstrap.servers' = 'kafka-kafka-bootstrap.p01-streaming:9092',
-    'format' = 'json'
+    'format' = 'json',
+    'sink.delivery-guarantee' = 'at-least-once'
 );
 
 CREATE TABLE out_counts_settled (
@@ -67,7 +74,8 @@ CREATE TABLE out_counts_settled (
     'connector' = 'kafka',
     'topic' = 'bsky.counts.settled.v1',
     'properties.bootstrap.servers' = 'kafka-kafka-bootstrap.p01-streaming:9092',
-    'format' = 'json'
+    'format' = 'json',
+    'sink.delivery-guarantee' = 'at-least-once'
 );
 
 -- The freshness signal. One row per closed window that carried traffic — a windowed GROUP BY emits
@@ -86,5 +94,6 @@ CREATE TABLE out_health (
     'connector' = 'kafka',
     'topic' = 'bsky.health.v1',
     'properties.bootstrap.servers' = 'kafka-kafka-bootstrap.p01-streaming:9092',
-    'format' = 'json'
+    'format' = 'json',
+    'sink.delivery-guarantee' = 'at-least-once'
 );
